@@ -672,22 +672,37 @@ get_sshd_config_value() {
 
 show_fail2ban_status() {
   printf "%b[Fail2ban]%b\n" "$COLOR_BOLD$COLOR_CYAN" "$COLOR_RESET"
-  if ! command -v systemctl >/dev/null 2>&1; then
-    echo "- systemctl unavailable"
+  if ! dpkg -s fail2ban >/dev/null 2>&1; then
+    echo "- fail2ban not installed"
     return
   fi
-  if systemctl list-unit-files 2>/dev/null | grep -q '^fail2ban\.service'; then
-    local state
-    state="$(systemctl is-active fail2ban 2>/dev/null || true)"
-    echo "- Service state: ${state:-unknown}"
-    if command -v fail2ban-client >/dev/null 2>&1; then
-      local jails
-      jails="$(fail2ban-client status 2>/dev/null | awk -F: '/Jail list/{gsub(/^ +/,"",$2); print $2}' || true)"
-      [[ -n "$jails" ]] && echo "- Active jails: $jails" || echo "- Active jails: none/unknown"
-    fi
-  else
-    echo "- fail2ban not installed"
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "- Package installed (systemctl unavailable)"
+    return
   fi
+
+  local state
+  state="$(systemctl is-active fail2ban 2>/dev/null || true)"
+  echo "- Service state: ${state:-unknown}"
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    local jails
+    jails="$(fail2ban-client status 2>/dev/null | awk -F: '/Jail list/{gsub(/^ +/,"",$2); print $2}' || true)"
+    [[ -n "$jails" ]] && echo "- Active jails: $jails" || echo "- Active jails: none/unknown"
+  fi
+}
+
+install_fail2ban() {
+  export DEBIAN_FRONTEND=noninteractive
+  wait_for_apt_lock || { log_err "Timeout waiting for apt lock."; return 1; }
+  log_info "Installing fail2ban..."
+  if apt-get update -y >/dev/null 2>&1 && apt-get install -y fail2ban >/dev/null 2>&1; then
+    systemctl enable --now fail2ban >/dev/null 2>&1 || true
+    log_ok "fail2ban installed."
+    return 0
+  fi
+  log_err "Failed to install fail2ban."
+  return 1
 }
 
 show_ssh_hardening_checks() {
@@ -745,17 +760,80 @@ show_unattended_upgrades_status() {
   fi
 }
 
+install_unattended_upgrades() {
+  export DEBIAN_FRONTEND=noninteractive
+  wait_for_apt_lock || { log_err "Timeout waiting for apt lock."; return 1; }
+  log_info "Installing unattended-upgrades..."
+  if apt-get update -y >/dev/null 2>&1 && apt-get install -y unattended-upgrades >/dev/null 2>&1; then
+    dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
+    log_ok "unattended-upgrades installed."
+    return 0
+  fi
+  log_err "Failed to install unattended-upgrades."
+  return 1
+}
+
 security_quick_checks_menu() {
-  clear >/dev/null 2>&1 || true
-  printf "%bSecurity Quick Checks%b\n\n" "$COLOR_BOLD$COLOR_CYAN" "$COLOR_RESET"
-  show_fail2ban_status
-  echo
-  show_ssh_hardening_checks
-  echo
-  show_open_ports_summary
-  echo
-  show_unattended_upgrades_status
-  echo
+  while true; do
+    clear >/dev/null 2>&1 || true
+    printf "%bSecurity Quick Checks%b\n\n" "$COLOR_BOLD$COLOR_CYAN" "$COLOR_RESET"
+    show_fail2ban_status
+    echo
+    show_ssh_hardening_checks
+    echo
+    show_open_ports_summary
+    echo
+    show_unattended_upgrades_status
+    echo
+
+    local fail2ban_missing unattended_missing
+    fail2ban_missing=0
+    unattended_missing=0
+    dpkg -s fail2ban >/dev/null 2>&1 || fail2ban_missing=1
+    dpkg -s unattended-upgrades >/dev/null 2>&1 || unattended_missing=1
+
+    if (( fail2ban_missing == 1 || unattended_missing == 1 )); then
+      local idx=1
+      local opt_fail2ban=0 opt_unattended=0 opt_back=0
+      if (( fail2ban_missing == 1 )); then
+        echo "${idx}) Install Fail2ban"
+        opt_fail2ban=$idx
+        idx=$((idx + 1))
+      fi
+      if (( unattended_missing == 1 )); then
+        echo "${idx}) Install Unattended Upgrades"
+        opt_unattended=$idx
+        idx=$((idx + 1))
+      fi
+      echo "${idx}) Back"
+      opt_back=$idx
+      printf "Choose an option [1-%s]: " "$opt_back"
+      local c
+      IFS= read -r c || return 0
+      [[ "$c" =~ ^[0-9]+$ ]] || { log_err "Invalid option."; sleep 1; continue; }
+      if (( opt_fail2ban > 0 )) && [[ "$c" -eq "$opt_fail2ban" ]]; then
+        install_fail2ban || true
+        pause_enter
+      elif (( opt_unattended > 0 )) && [[ "$c" -eq "$opt_unattended" ]]; then
+        install_unattended_upgrades || true
+        pause_enter
+      elif [[ "$c" -eq "$opt_back" ]]; then
+        return 0
+      else
+        log_err "Invalid option."
+        sleep 1
+      fi
+    else
+      echo "1) Back"
+      printf "Choose an option [1]: "
+      local c
+      IFS= read -r c || return 0
+      case "$c" in
+        1) return 0 ;;
+        *) log_err "Invalid option."; sleep 1 ;;
+      esac
+    fi
+  done
 }
 
 network_ping_test() {
@@ -1035,7 +1113,7 @@ menu_loop() {
       1) apt_maintenance || true; pause_enter ;;
       2) dns_settings_menu || true ;;
       3) change_apt_mirror_menu || true; pause_enter ;;
-      4) security_quick_checks_menu; pause_enter ;;
+      4) security_quick_checks_menu ;;
       5) network_diagnostics_menu ;;
       6) disk_explorer_menu ;;
       7) package_cleanup_menu ;;
