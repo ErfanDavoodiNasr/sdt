@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly INSTALL_PATH="/usr/local/bin/sdt"
-readonly DEFAULT_RAW_BASE="https://raw.githubusercontent.com/your-user/sdt/main"
+readonly DEFAULT_RAW_BASE="https://raw.githubusercontent.com/ErfanDavoodiNasr/sdt/master"
 readonly TMP_FILE="/tmp/sdt.sh.$$"
 
 log() { printf "[SDT Installer] %s\n" "$1"; }
